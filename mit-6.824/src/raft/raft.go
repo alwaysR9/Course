@@ -817,6 +817,22 @@ func HalfPlusOne(n int) int {
 	return n/2 + 1
 }
 
+func (rf *Raft) Lock() {
+	rf.mu.Lock()
+}
+
+func (rf *Raft) Unlock() {
+	rf.mu.Unlock()
+}
+
+func (rf *Raft) GetLogEntryAt(index int) LogEntry {
+	return rf.log[index]
+}
+
+func (rf *Raft) GetLogLen() int {
+	return len(rf.log)
+}
+
 func (rf *Raft) TurnToCandidate() {
 	rf.currentTerm += 1
 	rf.state = "candidate"

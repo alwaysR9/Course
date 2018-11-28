@@ -108,7 +108,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 			log.Fatalf("ClientEnd.Call(): decode reply: %v\n", err)
 		}
 		return true
-	} else {
+	} else {  // timeout and other error
 		return false
 	}
 }

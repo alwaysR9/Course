@@ -8,6 +8,17 @@ import (
 	"time"
 )
 
+/*
+* What the client must consider contains:
+* 1. client request can not reach the server.  // RPC Timeout labrpc.go:line 218
+* 2. the server is not a leader.  // RPC Return WrongLeader==true
+* 3. the server is a leader:
+*    3.1.1 leader has shutdown before apply the cmd.  // RPC Timeout, labrpc.go:line 262
+*    3.1.3 leader state changed before apply the cmd.  // RPC Return WrongLeader==true
+*    3.1.3 leader's raft can not commit in time. (may be partitioned)  // RPC Timeout, labrpc.go:line[280~293]
+*    3.1.4 leader apply the cmd successfully.  // RPC Return ok==true
+*/
+
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 
@@ -57,7 +68,7 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
 	args := GetArgs{key}
-	reply := GetReply{}
+	reply := GetReply{false, "", ""}
 
 	if Debug == 1 {
 		DPrintf("[client PutAppend()] get key=%s", key)
@@ -67,7 +78,15 @@ func (ck *Clerk) Get(key string) string {
 		if ok := ck.servers[ck.leaderID].Call("KVServer.Get", &args, &reply); ok {
 			if reply.WrongLeader == true {
 				ck.leaderID = -1
+			} else {
+				if reply.Err == "NotExist" {
+					return ""		
+				}
+				return reply.Value
 			}
+		} else {
+			// RPC Timeout: try other servers
+			ck.leaderID = -1
 		}
 	}
 
@@ -76,13 +95,16 @@ func (ck *Clerk) Get(key string) string {
 			break
 		}
 		for i := 0; i < len(ck.servers); i++ {
-			reply = GetReply{}
+			reply = GetReply{false, "", ""}
 			if ok := ck.servers[i].Call("KVServer.Get", &args, &reply); ok {
 				if reply.WrongLeader == true {
 					continue
 				}
 				ck.leaderID = i
 				break
+			} else {
+				// RPC Timeout: try other servers
+				ck.leaderID = -1
 			}
 		}
 	}
@@ -91,10 +113,10 @@ func (ck *Clerk) Get(key string) string {
 		DPrintf("[client Get()] SUCCESS get key=%s, value=%s", key, reply.Value)
 	}
 
-	if reply.Err != "NotExist" {
-		return reply.Value
+	if reply.Err == "NotExist" {
+		return ""		
 	}
-	return ""
+	return reply.Value
 }
 
 //
@@ -110,10 +132,10 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 	args := PutAppendArgs{key, value, op}
-	reply := PutAppendReply{}
+	reply := PutAppendReply{false, ""}
 
 	if Debug == 1 {
-		DPrintf("[client PutAppend()] %s key=%s, value=%s", op, key, value)
+		DPrintf("[client PutAppend() 1] %s key=%s, value=%s, current leaderID=%d, reply=%t", op, key, value, ck.leaderID, reply.WrongLeader)
 	}
 
 	if ck.leaderID != -1 {
@@ -127,7 +149,17 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				}
 				return // PutAppend() success
 			}
+		} else {
+			// RPC Timeout: try other servers
+			ck.leaderID = -1
+			if Debug == 1 {
+				DPrintf("[client PutAppend() x] %s key=%s, value=%s, current leaderID=%d, reply=%t, timeout!", op, key, value, ck.leaderID, reply.WrongLeader)
+			}
 		}
+	}
+
+	if Debug == 1 {
+		DPrintf("[client PutAppend() 2] %s key=%s, value=%s, current leaderID=%d, reply=%t", op, key, value, ck.leaderID, reply.WrongLeader)
 	}
 
 	for {
@@ -141,9 +173,23 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					continue
 				}
 				ck.leaderID = i
+				if Debug == 1 {
+					DPrintf("[client PutAppend()] SUCCESS leaderID=%d, find a new leader, key=%s, value=%s",
+						ck.leaderID, key, value)
+				}
 				break
+			} else {
+				// RPC Timeout: try other servers
+				ck.leaderID = -1
+				if Debug == 1 {
+					DPrintf("[client PutAppend() xx] %s key=%s, value=%s, current leaderID=%d, reply=%t, timeout!", op, key, value, ck.leaderID, reply.WrongLeader)
+				}
 			}
 		}
+	}
+
+	if Debug == 1 {
+		DPrintf("[client PutAppend() 3] %s key=%s, value=%s, current leaderID=%d, reply=%t", op, key, value, ck.leaderID, reply.WrongLeader)
 	}
 
 	if Debug == 1 {

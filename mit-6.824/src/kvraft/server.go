@@ -9,6 +9,22 @@ import (
 	"time"
 )
 
+/*
+* What the server must consider contains:
+* 1. the server is not a leader.  // RPC Return WrongLeader==true
+* 2. the server is a leader:
+*    2.1 not leader anymore.  // RPC Return WrongLeader==true
+*    2.2 still is leader, and term not changed:
+*        2.2.1 leader's raft can not commit in time. (may be partitioned)  // Do not return for RPC
+*        2.2.2 leader apply the cmd successfully.  // RPC Return ok==true
+*    2.3 still is leader, but term changed:
+*        2.3.1 cmd has been discard or overwrite.  // RPC Return WrongLeader==true --> can be optimazed
+*        2.3.2 cmd has not been overwrite:
+*              2.3.2.1 leader's raft can not commit in time. (may be partitioned)  // Do not return for RPC
+*              2.3.2.2 leader apply the cmd successfully.  // RPC Return ok==true
+*    
+*/
+
 const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -36,9 +52,9 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store      map[string]string // underlying storage
-	applyIndex int               // the lastest applied index
-	applyTerm  int               // the lastest applied term
+	store    map[string]string // underlying storage
+	cmtIndex int               // the lastest commited index
+	cmtTerm  int               // the lastest commited term
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -51,8 +67,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	command := Op{"Get", args.Key, ""}
-	curIndex, curTerm, isLeader := kv.rf.Start(command)
+	reqIndex, reqTerm, isLeader := kv.rf.Start(command)
 
+	// the server is not leader
 	if isLeader == false {
 		reply.WrongLeader = true
 		reply.Err = "Not a leader"
@@ -64,31 +81,55 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		time.Sleep(10 * time.Millisecond)
 		kv.mu.Lock()
-		rfTerm, isStillLeader := kv.rf.GetState()
-		// leadership has changed
-		if rfTerm != curTerm || isStillLeader == false {
+
+		kv.rf.Lock()  // make sure raft's state unchanged
+
+		curTerm, isStillLeader := kv.rf.GetState()
+		// the server is not leader anymore
+		if isStillLeader == false {
 			reply.WrongLeader = true
-			reply.Err = "Leader has changed"
+			reply.Err = "Not a leader, anymore"
 			reply.Value = ""
+			kv.rf.Unlock()
 			return
 		}
-		// leadership not change
-		// current command has been applied to underlying store
-		if curIndex <= kv.applyIndex && curTerm <= kv.applyTerm {
-			reply.WrongLeader = false
-			value, isExist := kv.store[args.Key]
-			if Debug == 1 {
-				DPrintf("[server Get()] SUCCESS get key=%s, isExist=%t", args.Key, isExist)
+		// the server is still leader and the term unchanged
+		if curTerm == reqTerm {
+			if kv.cmtIndex >= reqIndex {  // has been commited
+				reply.WrongLeader = false
+				reply.Err = ""
+				reply.Value = kv.store[args.Key]
+				kv.rf.Unlock()
+				return
+			} else { // has not been commited
+				// pass, may be cause the RPC of client Timeout
 			}
-			if !isExist {
-				reply.Err = "NotExist"
+		}
+		// the server still is leader, but term changed
+		if curTerm > reqTerm {
+			// the log entry has been discard or overwrite
+			if kv.rf.GetLogLen() <= reqIndex || kv.rf.GetLogEntryAt(reqIndex).Term != reqTerm {
+				reply.WrongLeader = true
+				reply.Err = "Not a leader, log entry discard or overwrite"
 				reply.Value = ""
+				kv.rf.Unlock()
 				return
 			}
-			reply.Err = ""
-			reply.Value = value
-			return
+			// the log entry has not been overwrite
+			if kv.rf.GetLogEntryAt(reqIndex).Term == reqTerm {
+				if kv.cmtIndex >= reqIndex {  // has been commited
+					reply.WrongLeader = false
+					reply.Err = ""
+					reply.Value = kv.store[args.Key]
+					kv.rf.Unlock()
+					return
+				} else { // has not been commited
+					// pass, may be cause the RPC of client Timeout
+				}
+			}
 		}
+
+		kv.rf.Unlock()
 	}
 }
 
@@ -97,13 +138,21 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
+	//if Debug == 1 {
+	//	DPrintf("[Server %d PutAppend 1] receive client request: value=%s", kv.me, args.Value)
+	//}
+
 	command := Op{args.Op, args.Key, args.Value}
-	curIndex, curTerm, isLeader := kv.rf.Start(command)
+	reqIndex, reqTerm, isLeader := kv.rf.Start(command)
 
 	if isLeader == false {
 		reply.WrongLeader = true
-		reply.Err = "FAIL_NOT_LEADER"
+		reply.Err = "Not a leader"
 		return
+	}
+
+	if Debug == 1 {
+		DPrintf("[Server %d PutAppend 2] receive client request: value=%s", kv.me, args.Value)
 	}
 
 	for {
@@ -111,24 +160,50 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		time.Sleep(10 * time.Millisecond)
 		kv.mu.Lock()
 
-		rfTerm, isStillLeader := kv.rf.GetState()
-		// leadership has changed
-		if rfTerm != curTerm || isStillLeader == false {
+		kv.rf.Lock()
+
+		curTerm, isStillLeader := kv.rf.GetState()
+		// the server is not leader anymore
+		if isStillLeader == false {
 			reply.WrongLeader = true
-			reply.Err = "FAIL_LEADER_CHANGED"
+			reply.Err = "Not a leader, anymore"
+			kv.rf.Unlock()
 			return
 		}
-		// leadership not change
-		// current command has been applied to underlying store
-		if curIndex <= kv.applyIndex && curTerm <= kv.applyTerm {
-			reply.WrongLeader = false
-			reply.Err = "SUCCESS_PUTAPPEND"
-			if Debug == 1 {
-				DPrintf("[server.go PutAppend() index_term] me=%d, curIndex=%d applyIndex=%d, curTerm=%d applyTerm=%d",
-					kv.me, curIndex, kv.applyIndex, curTerm, kv.applyTerm)
+		// the server is still leader and the term unchanged
+		if curTerm == reqTerm {
+			if kv.cmtIndex >= reqIndex {  // has been commited
+				reply.WrongLeader = false
+				reply.Err = ""
+				kv.rf.Unlock()
+				return
+			} else { // has not been commited
+				// pass, may be cause the RPC of client Timeout
 			}
-			return
 		}
+		// the server still is leader, but term changed
+		if curTerm > reqTerm {
+			// the log entry has been discard or overwrite
+			if kv.rf.GetLogLen() <= reqIndex || kv.rf.GetLogEntryAt(reqIndex).Term != reqTerm {
+				reply.WrongLeader = true
+				reply.Err = "Not a leader, log entry discard or overwrite"
+				kv.rf.Unlock()
+				return
+			}
+			// the log entry has not been overwrite
+			if kv.rf.GetLogEntryAt(reqIndex).Term == reqTerm {
+				if kv.cmtIndex >= reqIndex {  // has been commited
+					reply.WrongLeader = false
+					reply.Err = ""
+					kv.rf.Unlock()
+					return
+				} else { // has not been commited
+					// pass, may be cause the RPC of client Timeout
+				}
+			}
+		}
+
+		kv.rf.Unlock()
 	}
 }
 
@@ -150,11 +225,11 @@ func (kv *KVServer) Kill() {
 //
 func (kv *KVServer) ReceiveAndApplyCommand() {
 	for {
-		appliedMsg := <-kv.applyCh
+		cmtMsg := <-kv.applyCh
 
 		kv.mu.Lock()
 
-		command := appliedMsg.Command.(Op)
+		command := cmtMsg.Command.(Op)
 
 		if command.Type != "Get" {
 			if command.Type == "Put" {
@@ -168,11 +243,11 @@ func (kv *KVServer) ReceiveAndApplyCommand() {
 			}
 		}
 		// now, the client can see the data in the storage engine
-		kv.applyIndex = appliedMsg.CommandIndex
-		kv.applyTerm = appliedMsg.CommandTerm
+		kv.cmtIndex = cmtMsg.CommandIndex
+		kv.cmtTerm = cmtMsg.CommandTerm
 		if Debug == 1 {
-			DPrintf("[server.go ReceiveAndApplyCommand()] receive a applied command from raft, me=%d, key=%s value=%s op=%s, applyIndex=%d applyTerm=%d",
-				kv.me, command.Key, command.Value, command.Type, kv.applyIndex, kv.applyTerm)
+			DPrintf("[server.go ReceiveAndApplyCommand()] receive a applied command from raft, me=%d, key=%s value=%s op=%s, cmtIndex=%d cmtTerm=%d",
+				kv.me, command.Key, command.Value, command.Type, kv.cmtIndex, kv.cmtTerm)
 		}
 
 		kv.mu.Unlock()
@@ -204,8 +279,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	// You may need initialization code here.
 	kv.store = make(map[string]string)
-	kv.applyIndex = -1
-	kv.applyTerm = -1
+	kv.cmtIndex = -1
+	kv.cmtTerm = -1
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
