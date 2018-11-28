@@ -10,6 +10,24 @@ import (
 )
 
 /*
+* Big Picture of a kv server:
+*
+*   -------------             -------------
+*   | kv server |--|       |--| kv server |
+*   -------------  |       |  -------------
+*                  |       |
+*    -----------   |       |   -----------
+*    |         | <--[1]    --> |         |
+*    |   log   | <-----------> |   log   |
+*    |         |    [2]        |         |
+*    -----------               -----------
+* KV server can write to it's log [1],
+* and other log can also write to this log [2].
+* [1] and [2] are serial write to log.(because of Lock)
+*/
+
+/*
+* When a server receive a request from client,
 * What the server must consider contains:
 * 1. the server is not a leader.  // RPC Return WrongLeader==true
 * 2. the server is a leader:
@@ -22,7 +40,6 @@ import (
 *        2.3.2 cmd has not been overwrite:
 *              2.3.2.1 leader's raft can not commit in time. (may be partitioned)  // Do not return for RPC
 *              2.3.2.2 leader apply the cmd successfully.  // RPC Return ok==true
-*    
 */
 
 const Debug = 1

@@ -27,6 +27,26 @@ import "math/rand"
 import "bytes"
 import "labgob"
 
+/*
+* Duplicate Command From Client:
+* Problem:
+*   Client writing will cause duplicate command,
+*   Test Case:
+*     client send command to a leader,
+*     but the leader already contains this command in its log.
+*     (may be client send a command twice to a leader,
+*      or leader received this command from old leader.)
+* Proof:
+*   Assuming the leader's log is corrent, then follower's log
+*   should also be corrent, because log matching.
+*   So, only the client can cause leader contains duplicate command.
+* Solve:
+*   Set an ID for each client's command: clientID + self increasing number(for example: timestamp)
+*   when the leader receive client's command, check whether commandID larger than raft's seen[clientID],
+*   if so, this is a new command, and update seed[clientID]; else, this is a duplicate command.
+*   (each thread in client should contains its own clientID)
+*/
+
 //
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
