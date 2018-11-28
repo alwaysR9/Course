@@ -138,10 +138,6 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	//if Debug == 1 {
-	//	DPrintf("[Server %d PutAppend 1] receive client request: value=%s", kv.me, args.Value)
-	//}
-
 	command := Op{args.Op, args.Key, args.Value}
 	reqIndex, reqTerm, isLeader := kv.rf.Start(command)
 
