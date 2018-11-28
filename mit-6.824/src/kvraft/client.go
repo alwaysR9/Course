@@ -192,10 +192,6 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		DPrintf("[client PutAppend() 3] %s key=%s, value=%s, current leaderID=%d, reply=%t", op, key, value, ck.leaderID, reply.WrongLeader)
 	}
 
-	if Debug == 1 {
-		DPrintf("[client PutAppend()] SUCCESS leaderID=%d, key=%s, value=%s",
-			ck.leaderID, key, value)
-	}
 	return // PutAppend() success
 }
 
