@@ -2,7 +2,6 @@ package raftkv
 
 import (
 	"crypto/rand"
-	"fmt"
 	"labrpc"
 	"math/big"
 	"time"
@@ -19,11 +18,15 @@ import (
 *    3.1.4 leader apply the cmd successfully.  // RPC Return ok==true
 */
 
+/*
+* How client identification duplicate command:
+*    (clientID, commandID) pair
+*/
+
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 
 	// You will have to modify this struct.
-
 	// leader ID
 	leaderID int
 
@@ -31,17 +34,15 @@ type Clerk struct {
 	clientID int64 // rand int64
 }
 
+func (ck *Clerk) GetCommandID() int64 {
+	return time.Now().UnixNano()
+}
+
 func nrand() int64 {
 	max := big.NewInt(int64(1) << 62)
 	bigx, _ := rand.Int(rand.Reader, max)
 	x := bigx.Int64()
 	return x
-}
-
-// add by zfz
-func (ck *Clerk) GetUniqueOpFlag() string {
-	ts := time.Now().Unix()
-	return fmt.Sprintf("%d%d", ck.clientID, ts)
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
@@ -66,12 +67,12 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	// You will have to modify this function.
-	args := GetArgs{key}
+	commandID := nrand()
+	args := GetArgs{key, ck.clientID, commandID}
 	reply := GetReply{false, "", ""}
 
 	if Debug == 1 {
-		DPrintf("[client PutAppend()] get key=%s", key)
+		DPrintf("[clientID:%v Get()] argv=%v\n", ck.clientID, args)
 	}
 
 	if ck.leaderID != -1 {
@@ -110,7 +111,7 @@ func (ck *Clerk) Get(key string) string {
 	}
 
 	if Debug == 1 {
-		DPrintf("[client Get()] SUCCESS get key=%s, value=%s", key, reply.Value)
+		DPrintf("[clientID:%v Get()] SUCCESS argv=%v, reply=%v\n", ck.clientID, args, reply)
 	}
 
 	if reply.Err == "NotExist" {
@@ -130,12 +131,12 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
-	args := PutAppendArgs{key, value, op}
+	commandID := nrand()
+	args := PutAppendArgs{key, value, op, ck.clientID, commandID}
 	reply := PutAppendReply{false, ""}
 
 	if Debug == 1 {
-		DPrintf("[client PutAppend() 1] %s key=%s, value=%s, current leaderID=%d, reply=%t", op, key, value, ck.leaderID, reply.WrongLeader)
+		DPrintf("[clientID:%v PutAppend()] argv=%v\n", ck.clientID, args)
 	}
 
 	if ck.leaderID != -1 {
@@ -143,23 +144,12 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			if reply.WrongLeader == true {
 				ck.leaderID = -1
 			} else {
-				if Debug == 1 {
-					DPrintf("[client PutAppend()] SUCCESS leaderID=%d, already find leader, key=%s, value=%s",
-						ck.leaderID, key, value)
-				}
 				return // PutAppend() success
 			}
 		} else {
 			// RPC Timeout: try other servers
 			ck.leaderID = -1
-			if Debug == 1 {
-				DPrintf("[client PutAppend() x] %s key=%s, value=%s, current leaderID=%d, reply=%t, timeout!", op, key, value, ck.leaderID, reply.WrongLeader)
-			}
 		}
-	}
-
-	if Debug == 1 {
-		DPrintf("[client PutAppend() 2] %s key=%s, value=%s, current leaderID=%d, reply=%t", op, key, value, ck.leaderID, reply.WrongLeader)
 	}
 
 	for {
@@ -173,23 +163,16 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 					continue
 				}
 				ck.leaderID = i
-				if Debug == 1 {
-					DPrintf("[client PutAppend()] SUCCESS leaderID=%d, find a new leader, key=%s, value=%s",
-						ck.leaderID, key, value)
-				}
 				break
 			} else {
 				// RPC Timeout: try other servers
 				ck.leaderID = -1
-				if Debug == 1 {
-					DPrintf("[client PutAppend() xx] %s key=%s, value=%s, current leaderID=%d, reply=%t, timeout!", op, key, value, ck.leaderID, reply.WrongLeader)
-				}
 			}
 		}
 	}
 
 	if Debug == 1 {
-		DPrintf("[client PutAppend() 3] %s key=%s, value=%s, current leaderID=%d, reply=%t", op, key, value, ck.leaderID, reply.WrongLeader)
+		DPrintf("[clientID:%v PutAppend()] SUCCESS argv=%v, reply=%v\n", ck.clientID, args, reply)
 	}
 
 	return // PutAppend() success

@@ -1,22 +1,5 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
-// rf = Make(...)
-//   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
-//   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
-// ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
-//   should send an ApplyMsg to the service (or tester)
-//   in the same server.
-//
-
 import "sync"
 import "labrpc"
 
@@ -26,26 +9,6 @@ import "math/rand"
 
 import "bytes"
 import "labgob"
-
-/*
-* Duplicate Command From Client:
-* Problem:
-*   Client writing will cause duplicate command,
-*   Test Case:
-*     client send command to a leader,
-*     but the leader already contains this command in its log.
-*     (may be client send a command twice to a leader,
-*      or leader received this command from old leader.)
-* Proof:
-*   Assuming the leader's log is corrent, then follower's log
-*   should also be corrent, because log matching.
-*   So, only the client can cause leader contains duplicate command.
-* Solve:
-*   Set an ID for each client's command: clientID + self increasing number(for example: timestamp)
-*   when the leader receive client's command, check whether commandID larger than raft's seen[clientID],
-*   if so, this is a new command, and update seed[clientID]; else, this is a duplicate command.
-*   (each thread in client should contains its own clientID)
-*/
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -65,26 +28,17 @@ type ApplyMsg struct {
 	CommandTerm  int
 }
 
-// TODO 2A zfz
 type LogEntry struct {
 	Term    int
 	Command interface{}
 }
 
-//
-// A Go object implementing a single Raft peer.
-//
 type Raft struct {
 	mu        sync.Mutex          // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 
-	// Your data here (2A, 2B, 2C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-
-	// TODO 2A zfz
 	currentTerm int
 	voteFor     int // -1 if not vote in currentTerm
 	log         []LogEntry
@@ -100,8 +54,8 @@ type Raft struct {
 	nextIndex  []int // valid just for leader
 	matchIndex []int // valid just for leader
 
-	heartInterval   int // 100ms
-	lowElecInterval int // 1000ms
+	heartInterval   int // heartbeat interval
+	lowElecInterval int // the smallest election timeout
 
 	is_killed bool
 }
@@ -109,11 +63,8 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
 	var term int
 	var isleader bool
-	// Your code here (2A).
-	// TODO zfz
 	term = rf.currentTerm
 	if rf.state == "leader" {
 		isleader = true
@@ -123,22 +74,7 @@ func (rf *Raft) GetState() (int, bool) {
 	return term, isleader
 }
 
-//
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
-
-	// TODO by zfz
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	e.Encode(rf.currentTerm)
@@ -147,31 +83,13 @@ func (rf *Raft) persist() {
 	e.Encode(rf.state)
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	//DPrintf("server %v: SUCCESS persist()", rf.me)
 }
 
-//
-// restore previously persisted state.
-//
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
-
-	// TODO by zfz
+	
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var currentTerm int
@@ -192,31 +110,19 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 }
 
-//
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-//
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
 	Term         int
 	CandidateID  int
 	LastLogIndex int
 	LastLogTerm  int
 }
 
-//
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-//
 type RequestVoteReply struct {
-	// Your data here (2A).
 	Term        int
 	VoteGranted bool
 }
 
-//
-// example RequestVote RPC handler.
-//
+// RPC handler
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 
@@ -265,10 +171,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	return
 }
 
-//
-// example AppendEntries RPC arguments structure.
-// field names must start with capital letters!
-//
 type AppendEntriesArgs struct {
 	Term     int
 	LeaderID int
@@ -280,10 +182,6 @@ type AppendEntriesArgs struct {
 	LeaderCommit int
 }
 
-//
-// example AppendEntries RPC reply structure.
-// field names must start with capital letters!
-//
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
@@ -295,9 +193,7 @@ type AppendEntriesReply struct {
 	FirstTerm  int
 }
 
-//
-// example AppendEntries RPC handler.
-//
+// RPC handler
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 
 	is_should_persist := false
@@ -309,6 +205,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.persist()
 		}
 	}()
+
+	//DPrintf("server %v: receive heartbeat from %v\n", rf.me, args.LeaderID)
 
 	reply.Term = rf.currentTerm
 
@@ -392,9 +290,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	// now this is a new message, just do log copying
 	DPrintf("-------------------------")
-	if len(args.Entries) > 0 {
-		is_should_persist = true
-	}
+	is_should_persist = true
 
 	if leaderLogLen < len(rf.log) {
 		rf.log = append(rf.log[:leaderLogLen])
@@ -477,32 +373,24 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
-	// Your code here (2B).
-	// TODO zfz
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if rf.state != "leader" {
-		return index, term, false
+		return -1, -1, false
 	}
 
 	// add to log
 	rf.log = append(rf.log, LogEntry{rf.currentTerm, command})
 	rf.matchIndex[rf.me] = len(rf.log) - 1
 
-	// start sending log to followers,
-	// by setting heartbeat timeout
-	rf.ResetHeartbeatTimeout(0)
-
-	index = len(rf.log) - 1
-	term = rf.currentTerm
-	isLeader = true
+	index := len(rf.log) - 1
+	term := rf.currentTerm
+	isLeader := true
 
 	rf.persist()
+
+	rf.ResetHeartbeatTimeout(0)  // sending it to followers
 	return index, term, isLeader
 }
 

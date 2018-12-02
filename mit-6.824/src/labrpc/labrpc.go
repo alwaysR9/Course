@@ -107,6 +107,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 		if err := rd.Decode(reply); err != nil {
 			log.Fatalf("ClientEnd.Call(): decode reply: %v\n", err)
 		}
+		//log.Printf("[===== labrpc.go =====] reply from RPC: %v\n", reply)
 		return true
 	} else {  // timeout and other error
 		return false
@@ -217,6 +218,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the request, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
+			//log.Printf("[===== ProcessReq() =====] drop the request, return as if timeout\n")
 			return
 		}
 
@@ -264,12 +266,14 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		} else if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the reply, return as if timeout
 			req.replyCh <- replyMsg{false, nil}
+			//log.Printf("[===== ProcessReq() =====] drop the request, return as if timeout\n")
 		} else if longreordering == true && rand.Intn(900) < 600 {
 			// delay the response for a while
 			ms := 200 + rand.Intn(1+rand.Intn(2000))
 			// Russ points out that this timer arrangement will decrease
 			// the number of goroutines, so that the race
 			// detector is less likely to get upset.
+			//log.Printf("[===== ProcessReq() =====] delay the response for a while: %v\n", ms)
 			time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
 				req.replyCh <- reply
 			})
@@ -288,6 +292,7 @@ func (rn *Network) ProcessReq(req reqMsg) {
 			// server in fairly rapid succession.
 			ms = (rand.Int() % 100)
 		}
+		//log.Printf("[===== ProcessReq() =====] delay the response for a while: %v\n", ms)
 		time.AfterFunc(time.Duration(ms)*time.Millisecond, func() {
 			req.replyCh <- replyMsg{false, nil}
 		})

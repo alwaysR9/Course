@@ -28,7 +28,7 @@ import (
 
 /*
 * When a server receive a request from client,
-* What the server must consider contains:
+* What the server must consider:
 * 1. the server is not a leader.  // RPC Return WrongLeader==true
 * 2. the server is a leader:
 *    2.1 not leader anymore.  // RPC Return WrongLeader==true
@@ -42,6 +42,20 @@ import (
 *              2.3.2.2 leader apply the cmd successfully.  // RPC Return ok==true
 */
 
+/*
+* Duplicate Command From Client:
+*   client send command to a leader,
+*   but the leader already apply this command.
+*   (may be client send a command twice to a leader,
+*    or leader received this command from old leader.)
+* How to cope with duplicate command from same client?
+*    For each command, clientID and commandID should be a part of this command.
+*    Each kv server maintains a map, which contains all commands that have been applied.
+*    So, when the server receive a committed command from raft:
+*      1. this command has not been applied.
+*      2. this command has been applied, just discard it.
+*/
+
 const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -52,12 +66,11 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 }
 
 type Op struct {
-	// Your definitions here.
-	// Field names must start with capital letters,
-	// otherwise RPC will break.
 	Type  string // {"Get", "Put", "Append"}
 	Key   string
 	Value string
+	ClientID  int64
+	CommandID int64
 }
 
 type KVServer struct {
@@ -68,22 +81,18 @@ type KVServer struct {
 
 	maxraftstate int // snapshot if log grows this big
 
-	// Your definitions here.
-	store    map[string]string // underlying storage
+	// apply the committed command
+	store    map[string]string // store engine
 	cmtIndex int               // the lastest commited index
 	cmtTerm  int               // the lastest commited term
+
+	// used for filtering duplicate command
+	seen map[int64]int64 // map[clientID]commandID
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
-	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 
-	if Debug == 1 {
-		DPrintf("[server Get()] get key=%s", args.Key)
-	}
-
-	command := Op{"Get", args.Key, ""}
+	command := Op{"Get", args.Key, "", args.ClientID, args.CommandID}
 	reqIndex, reqTerm, isLeader := kv.rf.Start(command)
 
 	// the server is not leader
@@ -94,12 +103,16 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	for {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+	if Debug == 1 {
+		log.Printf("[server:%v Get()] argv=%v\n", kv.me, args)
+	}
 
-		kv.rf.Lock()  // make sure raft's state unchanged
+	defer kv.UnlockRaftSecondly()
+
+	for {
+		time.Sleep(10 * time.Millisecond)
+
+		kv.LockRaftFirstly()
 
 		curTerm, isStillLeader := kv.rf.GetState()
 		// the server is not leader anymore
@@ -107,16 +120,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.WrongLeader = true
 			reply.Err = "Not a leader, anymore"
 			reply.Value = ""
-			kv.rf.Unlock()
 			return
 		}
 		// the server is still leader and the term unchanged
 		if curTerm == reqTerm {
 			if kv.cmtIndex >= reqIndex {  // has been commited
 				reply.WrongLeader = false
-				reply.Err = ""
+				reply.Err = "SUCCESS"
 				reply.Value = kv.store[args.Key]
-				kv.rf.Unlock()
 				return
 			} else { // has not been commited
 				// pass, may be cause the RPC of client Timeout
@@ -129,16 +140,14 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				reply.WrongLeader = true
 				reply.Err = "Not a leader, log entry discard or overwrite"
 				reply.Value = ""
-				kv.rf.Unlock()
 				return
 			}
 			// the log entry has not been overwrite
 			if kv.rf.GetLogEntryAt(reqIndex).Term == reqTerm {
 				if kv.cmtIndex >= reqIndex {  // has been commited
 					reply.WrongLeader = false
-					reply.Err = ""
+					reply.Err = "SUCCESS"
 					reply.Value = kv.store[args.Key]
-					kv.rf.Unlock()
 					return
 				} else { // has not been commited
 					// pass, may be cause the RPC of client Timeout
@@ -146,16 +155,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			}
 		}
 
-		kv.rf.Unlock()
+		kv.UnlockRaftSecondly()
 	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
-
-	command := Op{args.Op, args.Key, args.Value}
+	
+	command := Op{args.Op, args.Key, args.Value, args.ClientID, args.CommandID}
 	reqIndex, reqTerm, isLeader := kv.rf.Start(command)
 
 	if isLeader == false {
@@ -165,30 +171,28 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	if Debug == 1 {
-		DPrintf("[Server %d PutAppend 2] receive client request: value=%s", kv.me, args.Value)
+		log.Printf("[server:%v PutAppend()] argv=%v\n", kv.me, args)
 	}
 
-	for {
-		kv.mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		kv.mu.Lock()
+	defer kv.UnlockRaftSecondly()
 
-		kv.rf.Lock()
+	for {
+		time.Sleep(10 * time.Millisecond)
+
+		kv.LockRaftFirstly()
 
 		curTerm, isStillLeader := kv.rf.GetState()
 		// the server is not leader anymore
 		if isStillLeader == false {
 			reply.WrongLeader = true
 			reply.Err = "Not a leader, anymore"
-			kv.rf.Unlock()
 			return
 		}
 		// the server is still leader and the term unchanged
 		if curTerm == reqTerm {
 			if kv.cmtIndex >= reqIndex {  // has been commited
 				reply.WrongLeader = false
-				reply.Err = ""
-				kv.rf.Unlock()
+				reply.Err = "SUCCESS"
 				return
 			} else { // has not been commited
 				// pass, may be cause the RPC of client Timeout
@@ -200,15 +204,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			if kv.rf.GetLogLen() <= reqIndex || kv.rf.GetLogEntryAt(reqIndex).Term != reqTerm {
 				reply.WrongLeader = true
 				reply.Err = "Not a leader, log entry discard or overwrite"
-				kv.rf.Unlock()
 				return
 			}
 			// the log entry has not been overwrite
 			if kv.rf.GetLogEntryAt(reqIndex).Term == reqTerm {
 				if kv.cmtIndex >= reqIndex {  // has been commited
 					reply.WrongLeader = false
-					reply.Err = ""
-					kv.rf.Unlock()
+					reply.Err = "SUCCESS"
 					return
 				} else { // has not been commited
 					// pass, may be cause the RPC of client Timeout
@@ -216,7 +218,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			}
 		}
 
-		kv.rf.Unlock()
+		kv.UnlockRaftSecondly()
 	}
 }
 
@@ -228,7 +230,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 //
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
-	DPrintf("=================== kill KV server ===================")
+	log.Printf("=================== kill KV server ===================")
 	// Your code here, if desired.
 }
 
@@ -240,30 +242,40 @@ func (kv *KVServer) ReceiveAndApplyCommand() {
 	for {
 		cmtMsg := <-kv.applyCh
 
-		kv.mu.Lock()
+		kv.Lock()
 
 		command := cmtMsg.Command.(Op)
+		
+		clientID := command.ClientID
+		commandID := command.CommandID
+		oldCommandID, ok := kv.seen[clientID]
 
-		if command.Type != "Get" {
-			if command.Type == "Put" {
-				kv.store[command.Key] = command.Value
-			} else {
-				if value, is_exist := kv.store[command.Key]; !is_exist {
+		// this is an command that never been applied
+		if !ok || commandID != oldCommandID {
+			if command.Type != "Get" {
+				if command.Type == "Put" {
 					kv.store[command.Key] = command.Value
 				} else {
-					kv.store[command.Key] = value + command.Value
+					if value, ok := kv.store[command.Key]; !ok {
+						kv.store[command.Key] = command.Value
+					} else {
+						kv.store[command.Key] = value + command.Value
+					}
 				}
 			}
+			// this command has been seen
+			kv.seen[clientID] = commandID
+		} else {
+			log.Printf("[server:%v Apply()] Find duplicate command=%v\n", kv.me, command)
 		}
 		// now, the client can see the data in the storage engine
 		kv.cmtIndex = cmtMsg.CommandIndex
 		kv.cmtTerm = cmtMsg.CommandTerm
 		if Debug == 1 {
-			DPrintf("[server.go ReceiveAndApplyCommand()] receive a applied command from raft, me=%d, key=%s value=%s op=%s, cmtIndex=%d cmtTerm=%d",
-				kv.me, command.Key, command.Value, command.Type, kv.cmtIndex, kv.cmtTerm)
+			log.Printf("[server:%v Apply()] command=%v\n", kv.me, command)
 		}
 
-		kv.mu.Unlock()
+		kv.Unlock()
 	}
 }
 
@@ -298,8 +310,33 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
+	kv.seen = make(map[int64]int64)
+
 	// You may need initialization code here.
 	go kv.ReceiveAndApplyCommand()
 
+	// set log
+	log.SetFlags(log.Lshortfile)
+
 	return kv
+}
+
+// Have to lock raft firstly in order 
+// to avoiding dead lock.
+func (kv *KVServer) LockRaftFirstly() {
+	kv.rf.Lock()
+	kv.Lock()
+}
+
+func (kv *KVServer) UnlockRaftSecondly() {
+	kv.Unlock()
+	kv.rf.Unlock()
+}
+
+func (kv *KVServer) Lock() {
+	kv.mu.Lock()
+}
+
+func (kv * KVServer) Unlock() {
+	kv.mu.Unlock()
 }
