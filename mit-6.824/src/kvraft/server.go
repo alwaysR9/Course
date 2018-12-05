@@ -56,6 +56,17 @@ import (
 *      2. this command has been applied, just discard it.
 */
 
+/*
+* How to deal with raft log become too large:
+*    If raft log become too large, we need do snapshot.
+*
+*    For the leader, after snapshot, the follower may lag too much,
+*    so the leader also need to send InatllSnapshot() RPC.
+*
+*    All these operation will be done in a background goroutine,
+*    and snapshot operation(bg goroutine) will Stop The World (STW)!
+*/
+
 const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -279,20 +290,7 @@ func (kv *KVServer) ReceiveAndApplyCommand() {
 	}
 }
 
-//
-// servers[] contains the ports of the set of
-// servers that will cooperate via Raft to
-// form the fault-tolerant key/value service.
-// me is the index of the current server in servers[].
-// the k/v server should store snapshots through the underlying Raft
-// implementation, which should call persister.SaveStateAndSnapshot() to
-// atomically save the Raft state along with the snapshot.
-// the k/v server should snapshot when Raft's saved state exceeds maxraftstate bytes,
-// in order to allow Raft to garbage-collect its log. if maxraftstate is -1,
-// you don't need to snapshot.
-// StartKVServer() must return quickly, so it should start goroutines
-// for any long-running work.
-//
+// init
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
@@ -302,7 +300,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.me = me
 	kv.maxraftstate = maxraftstate
 
-	// You may need initialization code here.
 	kv.store = make(map[string]string)
 	kv.cmtIndex = -1
 	kv.cmtTerm = -1
@@ -312,7 +309,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.seen = make(map[int64]int64)
 
-	// You may need initialization code here.
 	go kv.ReceiveAndApplyCommand()
 
 	// set log
