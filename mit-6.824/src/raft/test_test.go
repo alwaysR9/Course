@@ -568,6 +568,7 @@ func TestPersist22C(t *testing.T) {
 
 	index := 1
 	for iters := 0; iters < 5; iters++ {
+		DPrintf("Insert: %v\n", index)
 		cfg.one(10+index, servers, true)
 		index++
 
@@ -576,6 +577,7 @@ func TestPersist22C(t *testing.T) {
 		cfg.disconnect((leader1 + 1) % servers)
 		cfg.disconnect((leader1 + 2) % servers)
 
+		DPrintf("Insert: %v\n", index)
 		cfg.one(10+index, servers-2, true)
 		index++
 
@@ -588,11 +590,13 @@ func TestPersist22C(t *testing.T) {
 		cfg.connect((leader1 + 1) % servers)
 		cfg.connect((leader1 + 2) % servers)
 
+		DPrintf("Sleep 1s\n")
 		time.Sleep(RaftElectionTimeout)
 
 		cfg.start1((leader1 + 3) % servers)
 		cfg.connect((leader1 + 3) % servers)
 
+		DPrintf("Insert: %v\n", index)
 		cfg.one(10+index, servers-2, true)
 		index++
 
@@ -600,6 +604,7 @@ func TestPersist22C(t *testing.T) {
 		cfg.connect((leader1 + 0) % servers)
 	}
 
+	DPrintf("Insert: %v\n", 1000)
 	cfg.one(1000, servers, true)
 
 	cfg.end()

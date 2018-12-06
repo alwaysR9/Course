@@ -94,8 +94,8 @@ type KVServer struct {
 
 	// apply the committed command
 	store    map[string]string // store engine
-	cmtIndex int               // the lastest commited index
-	cmtTerm  int               // the lastest commited term
+	applyIndex int             // the lastest applied index, use it for cutting the log during snapshot
+	applyTerm  int             // the lastest applied term
 
 	// used for filtering duplicate command
 	seen map[int64]int64 // map[clientID]commandID
@@ -135,7 +135,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		}
 		// the server is still leader and the term unchanged
 		if curTerm == reqTerm {
-			if kv.cmtIndex >= reqIndex {  // has been commited
+			if kv.applyIndex >= reqIndex {  // has been commited
 				reply.WrongLeader = false
 				reply.Err = "SUCCESS"
 				reply.Value = kv.store[args.Key]
@@ -155,7 +155,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			}
 			// the log entry has not been overwrite
 			if kv.rf.GetLogEntryAt(reqIndex).Term == reqTerm {
-				if kv.cmtIndex >= reqIndex {  // has been commited
+				if kv.applyIndex >= reqIndex {  // has been commited
 					reply.WrongLeader = false
 					reply.Err = "SUCCESS"
 					reply.Value = kv.store[args.Key]
@@ -201,7 +201,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		}
 		// the server is still leader and the term unchanged
 		if curTerm == reqTerm {
-			if kv.cmtIndex >= reqIndex {  // has been commited
+			if kv.applyIndex >= reqIndex {  // has been commited
 				reply.WrongLeader = false
 				reply.Err = "SUCCESS"
 				return
@@ -219,7 +219,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			}
 			// the log entry has not been overwrite
 			if kv.rf.GetLogEntryAt(reqIndex).Term == reqTerm {
-				if kv.cmtIndex >= reqIndex {  // has been commited
+				if kv.applyIndex >= reqIndex {  // has been commited
 					reply.WrongLeader = false
 					reply.Err = "SUCCESS"
 					return
@@ -233,16 +233,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 }
 
-//
-// the tester calls Kill() when a KVServer instance won't
-// be needed again. you are not required to do anything
-// in Kill(), but it might be convenient to (for example)
-// turn off debug output from this instance.
-//
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
 	log.Printf("=================== kill KV server ===================")
-	// Your code here, if desired.
 }
 
 //
@@ -280,8 +273,8 @@ func (kv *KVServer) ReceiveAndApplyCommand() {
 			log.Printf("[server:%v Apply()] Find duplicate command=%v\n", kv.me, command)
 		}
 		// now, the client can see the data in the storage engine
-		kv.cmtIndex = cmtMsg.CommandIndex
-		kv.cmtTerm = cmtMsg.CommandTerm
+		kv.applyIndex = cmtMsg.CommandIndex
+		kv.applyTerm = cmtMsg.CommandTerm
 		if Debug == 1 {
 			log.Printf("[server:%v Apply()] command=%v\n", kv.me, command)
 		}
@@ -289,6 +282,25 @@ func (kv *KVServer) ReceiveAndApplyCommand() {
 		kv.Unlock()
 	}
 }
+
+/*
+func (kv *KVServer) DoSnapshot() {
+	for {
+		time.Sleep(10 * time.Millisecond)
+		if kv.maxraftstate < 0 {
+			continue
+		}
+
+		kv.LockRaftFirstly()
+
+		if kv.rf.GetRaftStateSize() >= kv.maxraftstate {
+			kv.rf.DoSnapshot(kv)
+		}
+
+		kv.UnlockRaftSecondly()
+	}
+}
+*/
 
 // init
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
@@ -301,8 +313,8 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	kv.store = make(map[string]string)
-	kv.cmtIndex = -1
-	kv.cmtTerm = -1
+	kv.applyIndex = -1
+	kv.applyTerm = -1
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
