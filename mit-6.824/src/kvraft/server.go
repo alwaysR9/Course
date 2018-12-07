@@ -58,13 +58,19 @@ import (
 
 /*
 * How to deal with raft log become too large:
-*    If raft log become too large, we need do snapshot.
+*    Because the log has been applied by kv,
+*    it no need to keep them in memory,
+*    we can just discard the log before the last applied by kv. 
 *
-*    For the leader, after snapshot, the follower may lag too much,
-*    so the leader also need to send InatllSnapshot() RPC.
+*    For the leader, after discard old log, log matching may fail, 
+*    when this happen, the leader need to Inatll Snapshot to follower.
 *
-*    All these operation will be done in a background goroutine,
-*    and snapshot operation(bg goroutine) will Stop The World (STW)!
+*    Discard old log will be done in a background goroutine,
+*    cause this method is much simpler than discard log when add entry to log.
+*
+*    Install Snapshot also will be done in a background grountine in Raft,
+*    when Install Snapshot detect some follower lag behind the leader's last applied index,
+*    it will Install Snapshot to those follower.
 */
 
 const Debug = 1
@@ -283,8 +289,9 @@ func (kv *KVServer) ReceiveAndApplyCommand() {
 	}
 }
 
-/*
-func (kv *KVServer) DoSnapshot() {
+func (kv *KVServer) DiscardAppliedLogAndSnapshot() {
+	// because need operate the log and kv engine,
+	// so we need lock Raft and KV server
 	for {
 		time.Sleep(10 * time.Millisecond)
 		if kv.maxraftstate < 0 {
@@ -294,13 +301,14 @@ func (kv *KVServer) DoSnapshot() {
 		kv.LockRaftFirstly()
 
 		if kv.rf.GetRaftStateSize() >= kv.maxraftstate {
-			kv.rf.DoSnapshot(kv)
+			snapshot := kv.rf.DoSnapshot(kv)
+			kv.rf.SaveSnapshot(snapshot, kv.applyIndex)
+			kv.rf.DiscardAppliedLog(kv.applyIndex)
 		}
 
 		kv.UnlockRaftSecondly()
 	}
 }
-*/
 
 // init
 func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {

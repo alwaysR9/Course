@@ -527,6 +527,15 @@ func (rf *Raft) ElecLoop() {
 				go func(i_peer, sendTerm, sendLastLogIndex, sendLastLogTerm int) { // send VoteRequests in Parallel
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
+
+					if rf.currentTerm != sendTerm || rf.state != "candidate" { // candidate can become follower or leader without change it's term
+						DPrintf("==========================")
+						DPrintf("server %v: (%v) my state have changed, no need to send heartbeat. sendTerm/currentTerm: %v/%v, sendLogLen/curLogLen: %v/%v",
+							rf.me, rf.state, sendTerm, rf.currentTerm, sendLastLogIndex+1, rf.GetLogLen())
+						DPrintf("==========================")
+						return
+					}
+
 					req := RequestVoteArgs{}
 					req.Term = sendTerm
 					req.CandidateID = rf.me
@@ -626,13 +635,28 @@ func (rf *Raft) AppendEntriesLoop() {
 				continue
 			}
 			go func(i_peer, sendTerm, sendLogLen, sendCommitIndex int) {
+				// simulate time delay
+				//r := rand.Int() % 200
+				//time.Sleep(time.Duration(r) * time.Millisecond)
+
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
+
+				if sendTerm != rf.currentTerm || rf.state != "leader" {
+					DPrintf("==========================")
+					DPrintf("server %v: (%v) my state have changed, no need to send heartbeat. sendTerm/currentTerm: %v/%v, sendLogLen/curLogLen: %v/%v",
+						rf.me, rf.state, sendTerm, rf.currentTerm, sendLogLen, rf.GetLogLen())
+					DPrintf("==========================")
+					return
+				}
+
 				args := AppendEntriesArgs{}
 				reply := AppendEntriesReply{}
 				i_next := rf.nextIndex[i_peer]
+
 				if i_next > sendLogLen {
-					DPrintf("i_next > sendLogLen, return send AppendEntries()")
+					DPrintf("server %v: (%v) i_next > sendLogLen, return send AppendEntries(). i_next/sendLogLen/curLogLen: %v/%v/%v",
+						rf.me, rf.state, i_next, sendLogLen, rf.GetLogLen())
 					return
 				}
 				args.Term = sendTerm
@@ -834,7 +858,7 @@ func (rf *Raft) InitFollowerLog() {
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i, _ := range rf.nextIndex {
-		rf.nextIndex[i] = len(rf.log)
+		rf.nextIndex[i] = rf.GetLogLen()
 		rf.matchIndex[i] = 0
 	}
 }
