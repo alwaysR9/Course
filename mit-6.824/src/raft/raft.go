@@ -77,6 +77,27 @@ type Raft struct {
 	isKilled bool
 }
 
+type StateContext struct {
+	state   string
+	term    int
+	voteFor int
+}
+
+func (c *StateContext) Compare(other *StateContext) bool {
+	return (c.state == other.state &&
+			c.term == other.term &&
+			c.voteFor == other.voteFor)
+}
+
+type LogContext struct {
+	lastEntryIndex int
+	lastEntryTerm  int
+}
+
+type CopyContext struct {
+	lastCopiedEntryIndex int
+}
+
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
@@ -391,7 +412,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			DPrintf("-------------------------")
 
 			// set commitIndex
-			rf.commitIndex = args.LeaderCommit
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = args.LeaderCommit
+			}
 
 			reply.Success = true
 			return
@@ -516,63 +539,90 @@ func (rf *Raft) ElecLoop() {
 			DPrintf("server %d: (%s term %d) need request vote, timeout %d, elapse %d",
 				rf.me, rf.state, rf.currentTerm, rf.elecTimeout, elapse)
 
-			paramTerm := rf.currentTerm
+			/*paramTerm := rf.currentTerm
 			paramLastLogIndex := rf.GetLastEntryIndex()
-			paramLastLogTerm := rf.GetLastEntryTerm()
+			paramLastLogTerm := rf.GetLastEntryTerm()*/
+
+			// save context
+			sendContext := &StateContext{rf.state, rf.currentTerm, rf.voteFor}
+			logContext := &LogContext{rf.GetLastEntryIndex(), rf.GetLastEntryTerm()}
 
 			for i, _ := range rf.peers {
 				if i == rf.me {
 					continue
 				}
-				go func(i_peer, sendTerm, sendLastLogIndex, sendLastLogTerm int) { // send VoteRequests in Parallel
+				go func(i_peer int) { // send VoteRequests in Parallel
+					// simulate time delay
+					r := rand.Int() % 200
+					time.Sleep(time.Duration(r) * time.Millisecond)
+
 					rf.mu.Lock()
 					defer rf.mu.Unlock()
 
-					if rf.currentTerm != sendTerm || rf.state != "candidate" { // candidate can become follower or leader without change it's term
+					/*if rf.currentTerm != sendTerm || rf.state != "candidate" { // candidate can become follower or leader without change it's term
 						DPrintf("==========================")
-						DPrintf("server %v: (%v) my state have changed, no need to send heartbeat. sendTerm/currentTerm: %v/%v, sendLogLen/curLogLen: %v/%v",
+						DPrintf("server %v: (%v) my state have changed, no need to send vote request. sendTerm/currentTerm: %v/%v, sendLogLen/curLogLen: %v/%v",
 							rf.me, rf.state, sendTerm, rf.currentTerm, sendLastLogIndex+1, rf.GetLogLen())
 						DPrintf("==========================")
+						return
+					}*/
+
+					// check state
+					curContext := &StateContext{rf.state, rf.currentTerm, rf.voteFor}
+					if !sendContext.Compare(curContext) {
+						DPrintf("server %v: (%v) my state have changed, no need to send vote request. sendTerm/currentTerm: %v/%v",
+							rf.me, rf.state, sendContext.term, curContext.term)
 						return
 					}
 
 					req := RequestVoteArgs{}
-					req.Term = sendTerm
+					req.Term = rf.currentTerm
 					req.CandidateID = rf.me
-					req.LastLogIndex = sendLastLogIndex
-					req.LastLogTerm = sendLastLogTerm
+					req.LastLogIndex = logContext.lastEntryIndex
+					req.LastLogTerm = logContext.lastEntryTerm
 					rep := RequestVoteReply{}
 
 					rf.mu.Unlock()
 					res := rf.sendRequestVote(i_peer, &req, &rep)
 					rf.mu.Lock()
 
-					if rf.currentTerm != sendTerm || rf.state != "candidate" { // candidate can become follower or leader without change it's term
+					/*if rf.currentTerm != sendTerm || rf.state != "candidate" { // candidate can become follower or leader without change it's term
 						DPrintf("==========================")
 						DPrintf("server %v: <out date vote request from server %v> (candidate/%v) sendTerm/currentTerm: %v/%v",
 							rf.me, i_peer, rf.state, sendTerm, rf.currentTerm)
 						DPrintf("==========================")
 						return
+					}*/
+
+					// check state
+					curContext = &StateContext{rf.state, rf.currentTerm, rf.voteFor}
+					if !sendContext.Compare(curContext) {
+						DPrintf("server %v: (%v) my state have changed, no need to send vote request. sendTerm/currentTerm: %v/%v",
+							rf.me, rf.state, sendContext.term, curContext.term)
+						return
 					}
+
+					// no need to check log,
+					// because if the log has changed, the state must changed already
 
 					if res == true { // reply from peer
 						DPrintf("==========================")
 						DPrintf("server %v: [receive vote from server %v]: sendTerm: %v",
-							rf.me, i_peer, sendTerm)
+							rf.me, i_peer, rf.currentTerm)
 						if rep.VoteGranted == false {
 							DPrintf("server %v: <but server %v reject this vote request>: sendTerm/reply.term: %v/%v",
-								rf.me, i_peer, sendTerm, rep.Term)
-							if rep.Term > sendTerm {
+								rf.me, i_peer, rf.currentTerm, rep.Term)
+							if rep.Term > rf.currentTerm {
 								rf.TurnToFollower(rep.Term, false)
 								rf.persist()
 							}
 						} else {
 							n_vote_for_me += 1
 							DPrintf("server %v: [server %v voteFor this vote request]: sendTerm/reply.term: %v/%v, n_vote_for_me: %v",
-								rf.me, i_peer, sendTerm, rep.Term, n_vote_for_me)
+								rf.me, i_peer, rf.currentTerm, rep.Term, n_vote_for_me)
 							if n_vote_for_me >= HalfPlusOne(len(rf.peers)) { // become leader
 								DPrintf("server %v: half plus one (%v) votes have been received, i will be leader, sendTerm/reply.term: %v/%v",
-									rf.me, n_vote_for_me, sendTerm, rep.Term)
+									rf.me, n_vote_for_me, rf.currentTerm, rep.Term)
 								rf.InitFollowerLog()
 								rf.TurnToLeader()
 								rf.persist()
@@ -582,11 +632,11 @@ func (rf *Raft) ElecLoop() {
 					} else { // no reply from peer
 						DPrintf("==========================")
 						DPrintf("server %v: <no reply from server %v, for this vote request>: sendTerm: %v",
-							rf.me, i_peer, sendTerm)
+							rf.me, i_peer, rf.currentTerm)
 						DPrintf("==========================")
 						return
 					}
-				}(i, paramTerm, paramLastLogIndex, paramLastLogTerm)
+				}(i)
 			}
 
 			// reset elecTimeout
@@ -626,35 +676,51 @@ func (rf *Raft) AppendEntriesLoop() {
 
 		// heartbeat timeout for leader
 		// send heartbeat and appendEntries for followers
-		paramTerm := rf.currentTerm
+		/*paramTerm := rf.currentTerm
 		paramCommitIndex := rf.commitIndex
-		paramLogLen := rf.GetLogLen()
+		paramLogLen := rf.GetLogLen()*/
+
+		// save context
+		sendContext := &StateContext{rf.state, rf.currentTerm, rf.voteFor}
 
 		for i, _ := range rf.peers {
 			if i == rf.me {
 				continue
 			}
-			go func(i_peer, sendTerm, sendLogLen, sendCommitIndex int) {
+			go func(i_peer int) {
 				// simulate time delay
-				//r := rand.Int() % 200
-				//time.Sleep(time.Duration(r) * time.Millisecond)
+				r := rand.Int() % 200
+				time.Sleep(time.Duration(r) * time.Millisecond)
 
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
 
-				if sendTerm != rf.currentTerm || rf.state != "leader" {
+				// check state context
+				curContext := &StateContext{rf.state, rf.currentTerm, rf.voteFor}
+				if !sendContext.Compare(curContext) {
+					DPrintf("server %v: (%v) my state have changed, no need to send heartbeat. sendTerm/currentTerm: %v/%v",
+						rf.me, rf.state, sendContext.term, curContext.term)
+					return
+				}
+
+				/*if sendTerm != rf.currentTerm || rf.state != "leader" {
 					DPrintf("==========================")
 					DPrintf("server %v: (%v) my state have changed, no need to send heartbeat. sendTerm/currentTerm: %v/%v, sendLogLen/curLogLen: %v/%v",
 						rf.me, rf.state, sendTerm, rf.currentTerm, sendLogLen, rf.GetLogLen())
 					DPrintf("==========================")
 					return
-				}
+				}*/
+
+				// now, I am still the leader, and my state has not changed.
+				// so, the log can not be cut. so, the length of the log must >= than any of nextIndex[i]
+				// we just send current (log, nextIndex[i], commitIndex) to others,
+				// no matter they have changed since calling this goroutine.
 
 				args := AppendEntriesArgs{}
 				reply := AppendEntriesReply{}
 				i_next := rf.nextIndex[i_peer]
 
-				if i_next > sendLogLen {
+				/*if i_next > sendLogLen {
 					DPrintf("server %v: (%v) i_next > sendLogLen, return send AppendEntries(). i_next/sendLogLen/curLogLen: %v/%v/%v",
 						rf.me, rf.state, i_next, sendLogLen, rf.GetLogLen())
 					return
@@ -664,29 +730,63 @@ func (rf *Raft) AppendEntriesLoop() {
 				args.PrevLogIndex = i_next - 1
 				args.PrevLogTerm = rf.GetLogEntryAt(i_next-1).Term
 				args.Entries = rf.log[i_next-rf.baseIndex:sendLogLen-rf.baseIndex] // new added entries
-				args.LeaderCommit = sendCommitIndex
+				args.LeaderCommit = sendCommitIndex*/
+
+				args.Term = rf.currentTerm
+				args.LeaderID = rf.me
+				args.PrevLogIndex = i_next - 1
+				args.PrevLogTerm = rf.GetLogEntryAt(i_next - 1).Term // the length of log must >= nextIndex[i], so here is safe
+				args.Entries = rf.log[i_next - rf.baseIndex : rf.GetLogLen() - rf.baseIndex]
+				args.LeaderCommit = rf.commitIndex
+
+				// save log context
+				copyContext := CopyContext{rf.GetLastEntryIndex()}
 
 				rf.mu.Unlock()
 				res := rf.sendAppendEntries(i_peer, &args, &reply)
 				rf.mu.Lock()
 
-				if sendTerm != rf.currentTerm || rf.state != "leader" {
+				// check state context
+				curContext = &StateContext{rf.state, rf.currentTerm, rf.voteFor}
+				if !sendContext.Compare(curContext) {
 					return
 				}
+				/*if sendTerm != rf.currentTerm || rf.state != "leader" {
+					return
+				}*/
 
 				if res == false { // no reply from peer
 					return
 				}
 
-				if reply.Success == true {
+				if reply.Success == true { // heartbeat and log copy successfully
 					// for heartbeat
 					//   do nothing
 					// for appendEntries
 					//   update nextIndex, matchIndex
 					//   Notice, just can commit with self Term
-					rf.nextIndex[i_peer] = sendLogLen
-					if sendTerm == rf.GetLogEntryAt(sendLogLen-1).Term { // can't submit previous leader's log
-						rf.matchIndex[i_peer] = sendLogLen - 1
+					lastMatchedEntryIndex := copyContext.lastCopiedEntryIndex
+					// other heartbeat thread could already update nextIndex and matchIndex
+					// so, before update them, we have to check them
+					if len(args.Entries) > 0 {
+						if lastMatchedEntryIndex + 1 > rf.nextIndex[i_peer] {
+							rf.nextIndex[i_peer] = lastMatchedEntryIndex + 1
+						} else {
+							// just for debug
+							DPrintf("server %v: (%v) (debug) this heartbeat is covered by newer heartbeat, nextIndex[%v]/lastMatchedEntryIndex+1: %v/%v",
+									rf.me, rf.state, i_peer, rf.nextIndex[i_peer], lastMatchedEntryIndex + 1)
+						}
+					} else {
+						// pass
+					}
+					// can't submit previous leader's log
+					if rf.currentTerm == rf.GetLogEntryAt(lastMatchedEntryIndex).Term && 
+						lastMatchedEntryIndex > rf.matchIndex[i_peer] {
+						rf.matchIndex[i_peer] = lastMatchedEntryIndex
+					} else if lastMatchedEntryIndex < rf.matchIndex[i_peer] {
+						// just for debug
+						DPrintf("server %v: (%v) (debug) this heartbeat is covered by newer heartbeat, matchIndex[%v]/lastMatchedEntryIndex: %v/%v",
+								rf.me, rf.state, i_peer, rf.matchIndex[i_peer], lastMatchedEntryIndex)
 					}
 				} else if reply.Term > rf.currentTerm {
 					rf.TurnToFollower(reply.Term, false)
@@ -713,6 +813,7 @@ func (rf *Raft) AppendEntriesLoop() {
 								}
 							}
 							if idx < 0 {
+								// never reach
 								DPrintf("Exception: nextIndex < 0")
 							}
 							rf.nextIndex[i_peer] = idx + 1
@@ -721,7 +822,7 @@ func (rf *Raft) AppendEntriesLoop() {
 							rf.me, i_peer, rf.nextIndex[i_peer], i_next, reply.FirstIndex, reply.FirstTerm)
 					}
 				}
-			}(i, paramTerm, paramLogLen, paramCommitIndex)
+			}(i)
 		}
 
 		// reset heartbeat timeout
