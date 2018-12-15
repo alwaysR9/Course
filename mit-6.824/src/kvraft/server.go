@@ -7,6 +7,8 @@ import (
 	"raft"
 	"sync"
 	"time"
+	"bytes"
+	"fmt"
 )
 
 /*
@@ -73,15 +75,6 @@ import (
 *    it will Install Snapshot to those follower.
 */
 
-const Debug = 1
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
-
 type Op struct {
 	Type  string // {"Get", "Put", "Append"}
 	Key   string
@@ -94,17 +87,23 @@ type KVServer struct {
 	mu      sync.Mutex
 	me      int
 	rf      *raft.Raft
-	applyCh chan raft.ApplyMsg
+	applyCh  chan raft.ApplyMsg
 
 	maxraftstate int // snapshot if log grows this big
 
-	// apply the committed command
+	// kv
 	store    map[string]string // store engine
-	applyIndex int             // the lastest applied index, use it for cutting the log during snapshot
-	applyTerm  int             // the lastest applied term
 
 	// used for filtering duplicate command
 	seen map[int64]int64 // map[clientID]commandID
+
+	applyIndex int             // the lastest applied index, use it for cutting the log during snapshot
+	applyTerm  int             // the lastest applied term
+}
+
+func (kv *KVServer) Log(logString string) {
+	log.Printf("[KVServer] server %v applyIndex:%v applyTerm:%v seen:%v %s",
+		kv.me, kv.applyIndex, kv.applyTerm, kv.seen, logString)
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -120,9 +119,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		return
 	}
 
-	if Debug == 1 {
-		log.Printf("[server:%v Get()] argv=%v\n", kv.me, args)
-	}
+	kv.Lock()
+	kv.Log(fmt.Sprintf("[Get]: argv:%v", args))
+	kv.Unlock()
 
 	defer kv.UnlockRaftSecondly()
 
@@ -187,9 +186,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	if Debug == 1 {
-		log.Printf("[server:%v PutAppend()] argv=%v\n", kv.me, args)
-	}
+	kv.Lock()
+	kv.Log(fmt.Sprintf("[Put]: argv:%v", args))
+	kv.Unlock()
 
 	defer kv.UnlockRaftSecondly()
 
@@ -248,48 +247,52 @@ func (kv *KVServer) Kill() {
 // receive applied command from raft,
 // and apply this command to store engine.
 //
-func (kv *KVServer) ReceiveAndApplyCommand() {
+func (kv *KVServer) ReceiveAndApplyCommandLoop() {
 	for {
 		cmtMsg := <-kv.applyCh
-
 		kv.Lock()
 
-		command := cmtMsg.Command.(Op)
-		
-		clientID := command.ClientID
-		commandID := command.CommandID
-		oldCommandID, ok := kv.seen[clientID]
+		if cmtMsg.ApplySnapshot {
+			kv.DecodeSnapshot(cmtMsg.Snapshot)
+			kv.Log(fmt.Sprintf("[ApplyCommand BGThread]: apply snapshot"))
+		} else {
+			command := cmtMsg.Command.(Op)
 
-		// this is an command that never been applied
-		if !ok || commandID != oldCommandID {
-			if command.Type != "Get" {
-				if command.Type == "Put" {
-					kv.store[command.Key] = command.Value
-				} else {
-					if value, ok := kv.store[command.Key]; !ok {
+			clientID := command.ClientID
+			commandID := command.CommandID
+			oldCommandID, ok := kv.seen[clientID]
+
+			// this is an command that never been applied
+			if !ok || commandID > oldCommandID {
+				if command.Type != "Get" {
+					if command.Type == "Put" {
 						kv.store[command.Key] = command.Value
 					} else {
-						kv.store[command.Key] = value + command.Value
+						if value, ok := kv.store[command.Key]; !ok {
+							kv.store[command.Key] = command.Value
+						} else {
+							kv.store[command.Key] = value + command.Value
+						}
 					}
 				}
+				// this command has been seen
+				kv.seen[clientID] = commandID
+			} else {
+				kv.Log(fmt.Sprintf("[ApplyCommand BGThread]: find duplicate command:%v", command))
 			}
-			// this command has been seen
-			kv.seen[clientID] = commandID
-		} else {
-			log.Printf("[server:%v Apply()] Find duplicate command=%v\n", kv.me, command)
-		}
-		// now, the client can see the data in the storage engine
-		kv.applyIndex = cmtMsg.CommandIndex
-		kv.applyTerm = cmtMsg.CommandTerm
-		if Debug == 1 {
-			log.Printf("[server:%v Apply()] command=%v\n", kv.me, command)
+			// now, the client can see the data in the storage engine
+			if cmtMsg.CommandIndex > kv.applyIndex {
+				kv.applyIndex = cmtMsg.CommandIndex
+				kv.applyTerm = cmtMsg.CommandTerm
+			}
+			kv.Log(fmt.Sprintf("[ApplyCommand BGThread]: apply command:%v successfully", command))
 		}
 
 		kv.Unlock()
 	}
 }
 
-func (kv *KVServer) DiscardAppliedLogAndSnapshot() {
+func (kv *KVServer) SnapshotAndDiscardOldLogLoop() {
 	// because need operate the log and kv engine,
 	// so we need lock Raft and KV server
 	for {
@@ -301,9 +304,11 @@ func (kv *KVServer) DiscardAppliedLogAndSnapshot() {
 		kv.LockRaftFirstly()
 
 		if kv.rf.GetRaftStateSize() >= kv.maxraftstate {
-			snapshot := kv.rf.DoSnapshot(kv)
-			kv.rf.SaveSnapshot(snapshot, kv.applyIndex)
-			kv.rf.DiscardAppliedLog(kv.applyIndex)
+			kv.Log(fmt.Sprintf("[SnapshotAndDiscardOldLogLoop BGThread]: begin to snapshot, raftStateSize:%v", kv.rf.GetRaftStateSize()))
+			snapshot := kv.EncodeSnapshot()
+			kv.rf.SaveSnapshotWithRaft(snapshot, kv.applyIndex)
+			kv.rf.DiscardOldLog(kv.applyIndex)
+			kv.Log(fmt.Sprintf("[SnapshotAndDiscardOldLogLoop BGThread]: end snapshot"))
 		}
 
 		kv.UnlockRaftSecondly()
@@ -319,17 +324,21 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(KVServer)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
+	//kv.maxraftstate = 30 * 256
 
-	kv.store = make(map[string]string)
-	kv.applyIndex = -1
-	kv.applyTerm = -1
+	kv.DecodeSnapshot(persister.ReadSnapshot())
+	if kv.store == nil {
+		kv.store = make(map[string]string)
+		kv.seen = make(map[int64]int64)
+		kv.applyIndex = 0
+		kv.applyTerm = 0
+	}
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	kv.seen = make(map[int64]int64)
-
-	go kv.ReceiveAndApplyCommand()
+	go kv.ReceiveAndApplyCommandLoop()
+	go kv.SnapshotAndDiscardOldLogLoop()
 
 	// set log
 	log.SetFlags(log.Lshortfile)
@@ -355,4 +364,39 @@ func (kv *KVServer) Lock() {
 
 func (kv * KVServer) Unlock() {
 	kv.mu.Unlock()
+}
+
+func (kv *KVServer) EncodeSnapshot() []byte {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.store)
+	e.Encode(kv.seen)
+	e.Encode(kv.applyIndex)
+	e.Encode(kv.applyTerm)
+	return w.Bytes()
+}
+
+func (kv *KVServer) DecodeSnapshot(data []byte) {
+	if data == nil || len(data) < 1 {
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var store  map[string]string
+	var seen   map[int64]int64
+	var applyIndex int
+	var applyTerm  int
+	if d.Decode(&store) != nil ||
+		d.Decode(&seen) != nil ||
+		d.Decode(&applyIndex) != nil ||
+		d.Decode(&applyTerm) != nil {
+		kv.Log(fmt.Sprintf("[DecodeSnapshot]: Fail ReadSnapshot"))
+	} else {
+		kv.store = store
+		kv.seen = seen
+		kv.applyIndex = applyIndex
+		kv.applyTerm = applyTerm
+		kv.Log(fmt.Sprintf("[DecodeSnapshot]: SUCCESS ReadSnapshot"))
+	}
 }

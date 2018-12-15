@@ -4,7 +4,8 @@ import (
 	"crypto/rand"
 	"labrpc"
 	"math/big"
-	"time"
+	"log"
+	"fmt"
 )
 
 /*
@@ -26,16 +27,19 @@ import (
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 
-	// You will have to modify this struct.
+	// client ID
+	clientID int64 // rand int64
+
 	// leader ID
 	leaderID int
 
-	// client ID
-	clientID int64 // rand int64
+	// command ID
+	commandID int64 // self increasing
 }
 
-func (ck *Clerk) GetCommandID() int64 {
-	return time.Now().UnixNano()
+func (ck *Clerk) Log(logString string) {
+	log.Printf("[KVClient] clientID:%v leaderID:%v %s",
+		ck.clientID, ck.leaderID, logString)
 }
 
 func nrand() int64 {
@@ -45,12 +49,19 @@ func nrand() int64 {
 	return x
 }
 
+func (ck *Clerk) GetCommandID() int64 {
+	r := ck.commandID
+	ck.commandID ++
+	return r
+}
+
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
 	ck.leaderID = -1
 	ck.clientID = nrand()
+	ck.commandID = 0
 	return ck
 }
 
@@ -67,13 +78,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	commandID := nrand()
+	commandID := ck.GetCommandID()
 	args := GetArgs{key, ck.clientID, commandID}
 	reply := GetReply{false, "", ""}
 
-	if Debug == 1 {
-		DPrintf("[clientID:%v Get()] argv=%v\n", ck.clientID, args)
-	}
+	ck.Log(fmt.Sprintf("[Get]: begin to get argv:%v", args))
 
 	if ck.leaderID != -1 {
 		if ok := ck.servers[ck.leaderID].Call("KVServer.Get", &args, &reply); ok {
@@ -110,9 +119,7 @@ func (ck *Clerk) Get(key string) string {
 		}
 	}
 
-	if Debug == 1 {
-		DPrintf("[clientID:%v Get()] SUCCESS argv=%v, reply=%v\n", ck.clientID, args, reply)
-	}
+	ck.Log(fmt.Sprintf("[Get]: get argv:%v reply:%v successfully", args, reply))
 
 	if reply.Err == "NotExist" {
 		return ""		
@@ -131,13 +138,11 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	commandID := nrand()
+	commandID := ck.GetCommandID()
 	args := PutAppendArgs{key, value, op, ck.clientID, commandID}
 	reply := PutAppendReply{false, ""}
 
-	if Debug == 1 {
-		DPrintf("[clientID:%v PutAppend()] argv=%v\n", ck.clientID, args)
-	}
+	ck.Log(fmt.Sprintf("[PutAppend]: begin to put argv:%v", args))
 
 	if ck.leaderID != -1 {
 		if ok := ck.servers[ck.leaderID].Call("KVServer.PutAppend", &args, &reply); ok {
@@ -171,9 +176,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		}
 	}
 
-	if Debug == 1 {
-		DPrintf("[clientID:%v PutAppend()] SUCCESS argv=%v, reply=%v\n", ck.clientID, args, reply)
-	}
+	ck.Log(fmt.Sprintf("[PutAppend]: put argv:%v reply:%v successfully", args, reply))
 
 	return // PutAppend() success
 }
