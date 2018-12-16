@@ -99,11 +99,46 @@ type KVServer struct {
 
 	applyIndex int             // the lastest applied index, use it for cutting the log during snapshot
 	applyTerm  int             // the lastest applied term
+
+	isKilled bool
 }
 
 func (kv *KVServer) Log(logString string) {
 	log.Printf("[KVServer] server %v applyIndex:%v applyTerm:%v seen:%v %s",
 		kv.me, kv.applyIndex, kv.applyTerm, kv.seen, logString)
+}
+
+// init
+func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
+	// call labgob.Register on structures you want
+	// Go's RPC library to marshall/unmarshall.
+	labgob.Register(Op{})
+
+	kv := new(KVServer)
+	kv.me = me
+	kv.maxraftstate = maxraftstate
+	//kv.maxraftstate = 30 * 256
+
+	kv.DecodeSnapshot(persister.ReadSnapshot())
+	if kv.store == nil {
+		kv.store = make(map[string]string)
+		kv.seen = make(map[int64]int64)
+		kv.applyIndex = 0
+		kv.applyTerm = 0
+	}
+
+	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
+
+	kv.isKilled = false
+
+	go kv.ReceiveAndApplyCommandLoop()
+	go kv.SnapshotAndDiscardOldLogLoop()
+
+	// set log
+	log.SetFlags(log.Lshortfile)
+
+	return kv
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
@@ -138,6 +173,13 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 			reply.Value = ""
 			return
 		}
+		// the server still is leader, but term changed
+		if curTerm > reqTerm {
+			reply.WrongLeader = true
+			reply.Err = "Leader term has changed"
+			reply.Value = ""
+			return
+		}
 		// the server is still leader and the term unchanged
 		if curTerm == reqTerm {
 			if kv.applyIndex >= reqIndex {  // has been commited
@@ -149,26 +191,9 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 				// pass, may be cause the RPC of client Timeout
 			}
 		}
-		// the server still is leader, but term changed
-		if curTerm > reqTerm {
-			// the log entry has been discard or overwrite
-			if kv.rf.GetLogLen() <= reqIndex || kv.rf.GetLogEntryAt(reqIndex).Term != reqTerm {
-				reply.WrongLeader = true
-				reply.Err = "Not a leader, log entry discard or overwrite"
-				reply.Value = ""
-				return
-			}
-			// the log entry has not been overwrite
-			if kv.rf.GetLogEntryAt(reqIndex).Term == reqTerm {
-				if kv.applyIndex >= reqIndex {  // has been commited
-					reply.WrongLeader = false
-					reply.Err = "SUCCESS"
-					reply.Value = kv.store[args.Key]
-					return
-				} else { // has not been commited
-					// pass, may be cause the RPC of client Timeout
-				}
-			}
+
+		if kv.isKilled {
+			return
 		}
 
 		kv.UnlockRaftSecondly()
@@ -204,6 +229,12 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			reply.Err = "Not a leader, anymore"
 			return
 		}
+		// the server still is leader, but term changed
+		if curTerm > reqTerm {
+			reply.WrongLeader = true
+			reply.Err = "Leader term has changed"
+			return
+		}
 		// the server is still leader and the term unchanged
 		if curTerm == reqTerm {
 			if kv.applyIndex >= reqIndex {  // has been commited
@@ -214,24 +245,9 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 				// pass, may be cause the RPC of client Timeout
 			}
 		}
-		// the server still is leader, but term changed
-		if curTerm > reqTerm {
-			// the log entry has been discard or overwrite
-			if kv.rf.GetLogLen() <= reqIndex || kv.rf.GetLogEntryAt(reqIndex).Term != reqTerm {
-				reply.WrongLeader = true
-				reply.Err = "Not a leader, log entry discard or overwrite"
-				return
-			}
-			// the log entry has not been overwrite
-			if kv.rf.GetLogEntryAt(reqIndex).Term == reqTerm {
-				if kv.applyIndex >= reqIndex {  // has been commited
-					reply.WrongLeader = false
-					reply.Err = "SUCCESS"
-					return
-				} else { // has not been commited
-					// pass, may be cause the RPC of client Timeout
-				}
-			}
+
+		if kv.isKilled {
+			return
 		}
 
 		kv.UnlockRaftSecondly()
@@ -240,6 +256,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 func (kv *KVServer) Kill() {
 	kv.rf.Kill()
+
+	kv.Lock()
+	kv.isKilled = true
+	kv.Unlock()
 	log.Printf("=================== kill KV server ===================")
 }
 
@@ -288,6 +308,10 @@ func (kv *KVServer) ReceiveAndApplyCommandLoop() {
 			kv.Log(fmt.Sprintf("[ApplyCommand BGThread]: apply command:%v successfully", command))
 		}
 
+		if kv.isKilled {
+			return
+		}
+
 		kv.Unlock()
 	}
 }
@@ -311,39 +335,12 @@ func (kv *KVServer) SnapshotAndDiscardOldLogLoop() {
 			kv.Log(fmt.Sprintf("[SnapshotAndDiscardOldLogLoop BGThread]: end snapshot"))
 		}
 
+		if kv.isKilled {
+			return
+		}
+
 		kv.UnlockRaftSecondly()
 	}
-}
-
-// init
-func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister, maxraftstate int) *KVServer {
-	// call labgob.Register on structures you want
-	// Go's RPC library to marshall/unmarshall.
-	labgob.Register(Op{})
-
-	kv := new(KVServer)
-	kv.me = me
-	kv.maxraftstate = maxraftstate
-	//kv.maxraftstate = 30 * 256
-
-	kv.DecodeSnapshot(persister.ReadSnapshot())
-	if kv.store == nil {
-		kv.store = make(map[string]string)
-		kv.seen = make(map[int64]int64)
-		kv.applyIndex = 0
-		kv.applyTerm = 0
-	}
-
-	kv.applyCh = make(chan raft.ApplyMsg)
-	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
-	go kv.ReceiveAndApplyCommandLoop()
-	go kv.SnapshotAndDiscardOldLogLoop()
-
-	// set log
-	log.SetFlags(log.Lshortfile)
-
-	return kv
 }
 
 // Have to lock raft firstly in order 

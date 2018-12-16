@@ -610,7 +610,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 
 	// install log
-	rf.log = make([]LogEntry, 1)
+	newBaseIndex := args.LastIncludedIndex
+	if newBaseIndex > rf.GetLastEntryIndex() {
+		rf.log = make([]LogEntry, 1)
+	} else {
+		physicalIndex := rf.GetPhysicalIndex(newBaseIndex)
+		rf.log = append(rf.log[physicalIndex:])
+	}
 	rf.baseIndex = args.LastIncludedIndex
 	rf.log[0].Term = args.LastIncludedTerm
 	rf.commitIndex = rf.baseIndex
@@ -778,6 +784,9 @@ func (rf *Raft) AppendEntriesLoop() {
 
 				rf.mu.Lock()
 				defer rf.mu.Unlock()
+				defer func () {
+					rf.Log(fmt.Sprintf("[heartbeat GBThread]: end heartbeat to server %v", i_peer))
+				}()
 
 				rf.Log(fmt.Sprintf("[heartbeat GBThread]: begin heartbeat to server %v", i_peer))
 
@@ -885,7 +894,6 @@ func (rf *Raft) AppendEntriesLoop() {
 						}
 					}
 				}
-				rf.Log(fmt.Sprintf("[heartbeat GBThread]: end heartbeat to server %v", i_peer))
 			}(i)
 		}
 
