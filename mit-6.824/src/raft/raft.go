@@ -1016,6 +1016,10 @@ func (rf *Raft) InstallSnapshotLoop() {
 }
 
 //=============== private func ================//
+func (rf *Raft) GetBaseIndex() int {
+	return rf.baseIndex
+}
+
 func (rf *Raft) GetLastEntryIndex() int {
 	return rf.GetLogLen() - 1
 }

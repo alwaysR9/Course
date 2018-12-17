@@ -327,6 +327,17 @@ func (kv *KVServer) SnapshotAndDiscardOldLogLoop() {
 
 		kv.LockRaftFirstly()
 
+		// kv.applyIndex must larger than raft.baseIndex
+		// So, if kv.applyIndex < raft.baseIndex:
+		// it represents a new snapshot has not been applied,
+		// meanwhile the log of raft has been cut.
+		// In this case, we do nothing, just wait new snapshot
+		// to be applied.
+		if kv.applyIndex < kv.rf.GetBaseIndex() {
+			kv.UnlockRaftSecondly()
+			continue
+		}
+
 		if kv.rf.GetRaftStateSize() >= kv.maxraftstate {
 			kv.Log(fmt.Sprintf("[SnapshotAndDiscardOldLogLoop BGThread]: begin to snapshot, raftStateSize:%v", kv.rf.GetRaftStateSize()))
 			snapshot := kv.EncodeSnapshot()
